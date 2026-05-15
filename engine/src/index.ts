@@ -1,7 +1,7 @@
 import "dotenv/config";
 import { createClient } from "redis";
 import { env } from "./utils/env.js";
-import { BALANCES, ORDERBOOKS, ORDERS, type Side, type Fill, type OrderStatus, type OrderType} from "./store/exchange-store.js";
+import { BALANCES, ORDERBOOKS, ORDERS, type Side, type Fill, type OrderStatus, type OrderType, type RestingOrder } from "./store/exchange-store.js";
 
 export type EngineCommandType =
   | "create_order"
@@ -68,28 +68,110 @@ function handleEngineRequest(message: EngineRequest): unknown {
    */
 
   switch (message.type) {
-    case "create_order":{
+    case "create_order": {
       const order = {
         orderId: crypto.randomUUID(),
         userId: message.payload.userId as string,
-        side: message.payload.side as "buy"|"sell",
+        side: message.payload.side as "buy" | "sell",
         type: message.payload.type as OrderType,
         symbol: message.payload.symbol as string,
-        price: message.payload.price as number|null,
+        price: message.payload.price as number | null,
         qty: message.payload.qty as number,
         filledQty: 0,
         status: "open" as OrderStatus,
         fills: [] as Fill[],
         createdAt: Date.now()
       }
-       ORDERS.set(order.orderId, order);
+      ORDERS.set(order.orderId, order);
 
-       if(!ORDERBOOKS.has(order.symbol)) {
-        ORDERBOOKS.set(order.symbol, { bids: new Map(), asks: new Map()});
-       }
-       const orderBook = ORDERBOOKS.get(order.symbol);
+      if (!ORDERBOOKS.has(order.symbol)) {
+        ORDERBOOKS.set(order.symbol, { bids: new Map(), asks: new Map() });
+      }
+      const orderBook = ORDERBOOKS.get(order.symbol)!;
+
+      if (order.side === "buy") {
+        while (order.filledQty < order.qty) {
+          const lowestAskPrice = Math.min(...orderBook.asks.keys());
+          if (lowestAskPrice === Infinity || lowestAskPrice > order.price!) {
+            break;
+          }
+          const askOrders = orderBook.asks.get(lowestAskPrice)!
+          const askOrder = askOrders[0]!;
+
+          const fillQty = Math.min(order.qty - order.filledQty, askOrder.qty - askOrder.filledQty);
+
+          order.filledQty += fillQty;
+          askOrder.filledQty += fillQty;
+
+          const fill: Fill = {
+            fillId: crypto.randomUUID(),
+            symbol: order.symbol,
+            price: lowestAskPrice,
+            qty: fillQty,
+            buyOrderId: order.orderId,
+            sellOrderId: askOrder.orderId,
+            createdAt: Date.now()
+          }
+
+          order.fills.push(fill);
+          const askOrderRecord = ORDERS.get(askOrder.orderId);
+          askOrderRecord?.fills.push(fill);
+          if (askOrder.filledQty === askOrder.qty) {
+            askOrder.status = "filled";
+            askOrders.shift();
+            if (askOrders.length === 0) {
+              orderBook.asks.delete(lowestAskPrice)
+            }
+          } else {
+            askOrder.status = "partially_filled";
+          }
+        }
+
+        if (order.filledQty === order.qty) {
+          order.status = "filled";
+        } else if (order.filledQty > 0) {
+          order.status = "partially_filled";
+          const restingOrder: RestingOrder = {
+            orderId: order.orderId as string,
+            userId: order.userId as string,
+            side: order.side as "buy" | "sell",
+            type: "limit",
+            symbol: order.symbol as string,
+            price: order.price as number,
+            qty: order.qty as number,
+            filledQty: order.filledQty as number,
+            status: order.status,
+            createdAt: order.createdAt as number,
+          }
+          const existing = orderBook.bids.get(order.price!)
+          if (existing) {
+            existing.push(restingOrder)
+          } else {
+            orderBook.bids.set(order.price!, [restingOrder])
+          }
+        } else {
+          const restingOrder: RestingOrder = {
+            orderId: order.orderId as string,
+            userId: order.userId as string,
+            side: order.side as "buy" | "sell",
+            type: "limit",
+            symbol: order.symbol as string,
+            price: order.price as number,
+            qty: order.qty as number,
+            filledQty: order.filledQty as number,
+            status: order.status,
+            createdAt: order.createdAt as number,
+          }
+          const existing = orderBook.bids.get(order.price!)
+          if (existing) {
+            existing.push(restingOrder)
+          } else {
+            orderBook.bids.set(order.price!, [restingOrder])
+          }
+        }
+      }
     }
-      
+
       break
     case "get_depth": {
       const symbol = message.payload.symbol as string;
@@ -127,37 +209,37 @@ function handleEngineRequest(message: EngineRequest): unknown {
       const orderId = message.payload.orderId as string;
       const userId = message.payload.userId as string;
       const order = ORDERS.get(orderId);
-      if(!order){
+      if (!order) {
         throw new Error("order not found");
       }
       const isOwner = order.userId === userId;
-      if(!isOwner){
+      if (!isOwner) {
         throw new Error("unauthorised");
       }
       return order;
     }
-    case "cancel_order":{
+    case "cancel_order": {
       const orderId = message.payload.orderId as string;
       const userId = message.payload.userId as string;
       const order = ORDERS.get(orderId);
-      if(!order){
+      if (!order) {
         throw new Error("order not found");
       }
 
       const isOwner = order.userId === userId;
-      if(!isOwner) {
+      if (!isOwner) {
         throw new Error("unauthorised");
       }
-      if(order.status === "filled" || order.status === "cancelled"){
+      if (order.status === "filled" || order.status === "cancelled") {
         throw new Error("Order already filled or cancelled.");
       }
 
       const orderBook = ORDERBOOKS.get(order.symbol);
       order.status = "cancelled";
-      if(orderBook){
+      if (orderBook) {
         const side = order.side === "buy" ? orderBook.bids : orderBook.asks;
         const priceLevel = side.get(order.price!);
-        if(priceLevel){
+        if (priceLevel) {
           const filtered = priceLevel.filter((o) => o.orderId != orderId);
           side.set(order.price!, filtered);
         }
