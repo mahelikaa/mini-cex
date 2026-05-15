@@ -34,5 +34,37 @@ export async function signup(req: Request, res: Response): Promise<void> {
 }
 
 export async function signin(req: Request, res: Response): Promise<void> {
-  //TODO: Implement signin logic
+  const parsedBody = authSchema.safeParse(req.body);
+  if (!parsedBody.success) {
+    sendValidationError(res, parsedBody.error);
+    return;
+  }
+
+  const { username, password } = parsedBody.data;
+
+  const user = await prisma.user.findUnique({
+    where: { username },
+  });
+
+  if (!user) {
+    res.status(401).json({
+      message: "invalid credentials.",
+    });
+    return;
+  }
+
+  const isMatch = await bcrypt.compare(password, user.password);
+
+  if (!isMatch) {
+    res.status(401).json({
+      message: "invalid credentials.",
+    });
+    return;
+  }
+
+  res.status(200).json({
+    token: createToken({ userId: user.id }),
+    userId: user.id,
+    username: user.username,
+  });
 }
