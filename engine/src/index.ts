@@ -102,7 +102,10 @@ function handleEngineRequest(message: EngineRequest): unknown {
 
           order.filledQty += fillQty;
           askOrder.filledQty += fillQty;
-
+          const askOrderRecord = ORDERS.get(askOrder.orderId);
+          if (askOrderRecord) {
+            askOrderRecord.filledQty = askOrder.filledQty;
+          }
           const fill: Fill = {
             fillId: crypto.randomUUID(),
             symbol: order.symbol,
@@ -114,16 +117,17 @@ function handleEngineRequest(message: EngineRequest): unknown {
           }
 
           order.fills.push(fill);
-          const askOrderRecord = ORDERS.get(askOrder.orderId);
           askOrderRecord?.fills.push(fill);
           if (askOrder.filledQty === askOrder.qty) {
             askOrder.status = "filled";
+            if (askOrderRecord) askOrderRecord.status = "filled";
             askOrders.shift();
             if (askOrders.length === 0) {
               orderBook.asks.delete(lowestAskPrice)
             }
           } else {
             askOrder.status = "partially_filled";
+            if (askOrderRecord) askOrderRecord.status = "partially_filled";
           }
         }
 
@@ -170,9 +174,95 @@ function handleEngineRequest(message: EngineRequest): unknown {
           }
         }
       }
-    }
 
-      break
+      if (order.side === "sell") {
+        while (order.filledQty < order.qty) {
+          const highestBidPrice = Math.max(...orderBook.bids.keys());
+          if (highestBidPrice === -Infinity || highestBidPrice < order.price!) {
+            break;
+          }
+          const bidOrders = orderBook.bids.get(highestBidPrice)!;
+          const bidOrder = bidOrders[0]!;
+
+          const fillQty = Math.min(order.qty - order.filledQty, bidOrder.qty - bidOrder.filledQty);
+
+          order.filledQty += fillQty;
+          bidOrder.filledQty += fillQty;
+
+          const fill: Fill = {
+            fillId: crypto.randomUUID(),
+            symbol: order.symbol,
+            price: highestBidPrice,
+            qty: fillQty,
+            sellOrderId: order.orderId,
+            buyOrderId: bidOrder.orderId,
+            createdAt: Date.now()
+          }
+
+          order.fills.push(fill);
+          const bidOrderRecord = ORDERS.get(bidOrder.orderId);
+          bidOrderRecord?.fills.push(fill);
+
+          if (bidOrder.filledQty === bidOrder.qty) {
+            bidOrder.status = "filled";
+             if (bidOrderRecord) bidOrderRecord.status = "filled";
+            bidOrders.shift();
+            if (bidOrders.length === 0) {
+              orderBook.bids.delete(highestBidPrice);
+            }
+          } else {
+            bidOrder.status = "partially_filled";
+            if (bidOrderRecord) bidOrderRecord.status = "partially_filled";
+          }
+        }
+
+        if (order.filledQty === order.qty) {
+          order.status = "filled";
+        } else if (order.filledQty > 0) {
+          order.status = "partially_filled";
+          const restingOrder: RestingOrder = {
+            orderId: order.orderId as string,
+            userId: order.userId as string,
+            side: order.side as "buy" | "sell",
+            type: "limit",
+            symbol: order.symbol as string,
+            price: order.price as number,
+            qty: order.qty as number,
+            filledQty: order.filledQty as number,
+            status: order.status,
+            createdAt: order.createdAt as number,
+          }
+
+          const existing = orderBook.asks.get(order.price!);
+          if (existing) {
+            existing.push(restingOrder);
+          } else {
+            orderBook.asks.set(order.price!, [restingOrder]);
+          }
+        } else {
+          const restingOrder: RestingOrder = {
+            orderId: order.orderId as string,
+            userId: order.userId as string,
+            side: order.side as "buy" | "sell",
+            type: "limit",
+            symbol: order.symbol as string,
+            price: order.price as number,
+            qty: order.qty as number,
+            filledQty: order.filledQty as number,
+            status: order.status,
+            createdAt: order.createdAt as number,
+          }
+
+          const existing = orderBook.asks.get(order.price!);
+          if (existing) {
+            existing.push(restingOrder);
+          } else {
+            orderBook.asks.set(order.price!, [restingOrder]);
+          }
+        }
+      }
+      return order;
+    }
     case "get_depth": {
       const symbol = message.payload.symbol as string;
       if (!ORDERBOOKS.has(symbol)) {
@@ -269,7 +359,7 @@ function handleEngineRequest(message: EngineRequest): unknown {
   //   };
   // }
 
-  throw new Error("TODO(student): implement this engine request type");
+  // throw new Error("TODO(student): implement this engine request type");
 }
 
 console.log(`Engine listening on Redis queue: ${env.incomingQueue}`);
